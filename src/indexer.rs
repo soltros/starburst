@@ -1,5 +1,62 @@
 use crate::config::Indexer;
 use anyhow::{bail, Context, Result};
+pub struct Preset {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub site: &'static str,
+}
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "NZBGeek",
+        url: "https://api.nzbgeek.info/api",
+        site: "https://nzbgeek.info",
+    },
+    Preset {
+        name: "NZBPlanet",
+        url: "https://api.nzbplanet.net/api",
+        site: "https://nzbplanet.net",
+    },
+    Preset {
+        name: "DrunkenSlug",
+        url: "https://drunkenslug.com/api",
+        site: "https://drunkenslug.com",
+    },
+    Preset {
+        name: "NZBFinder",
+        url: "https://nzbfinder.ws/api",
+        site: "https://nzbfinder.ws",
+    },
+    Preset {
+        name: "altHUB",
+        url: "https://api.althub.co.za/api",
+        site: "https://althub.co.za",
+    },
+];
+pub fn preset_indexer(preset: &Preset) -> Indexer {
+    Indexer {
+        name: preset.name.into(),
+        url: preset.url.into(),
+        api_key: String::new(),
+    }
+}
+pub fn search_all(indexers: Vec<Indexer>, query: String) -> (Vec<Release>, Vec<String>) {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (vec![], vec!["Could not create search client".into()]),
+    };
+    let mut rows = vec![];
+    let mut errors = vec![];
+    for indexer in indexers {
+        match search(&client, &indexer, &query) {
+            Ok(mut r) => rows.append(&mut r),
+            Err(e) => errors.push(format!("{}: {e}", indexer.name)),
+        }
+    }
+    (rows, errors)
+}
 #[derive(Clone, Debug)]
 pub struct Release {
     pub title: String,
@@ -21,7 +78,8 @@ pub fn search(
         .append_pair("t", "search")
         .append_pair("q", query)
         .append_pair("apikey", &indexer.api_key)
-        .append_pair("limit", "100");
+        .append_pair("limit", "100")
+        .append_pair("o", "xml");
     // Deliberately omit request URLs from errors: they contain API keys.
     let response = client
         .get(url)
@@ -136,7 +194,8 @@ mod http_tests {
             url: format!("http://{addr}"),
             api_key: "private-key".into(),
         };
-        let rows = search(&reqwest::blocking::Client::new(), &i, "hello world&test").unwrap();
+        let (rows, errors) = search_all(vec![i], "hello world&test".into());
+        assert!(errors.is_empty());
         server.join().unwrap();
         assert_eq!(rows[0].size, 42);
     }

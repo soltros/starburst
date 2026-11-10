@@ -1,7 +1,7 @@
 mod config;
 mod engine;
 mod indexer;
-use config::{Config, Indexer, Provider};
+use config::{Config, Provider};
 use eframe::egui::{self, Color32, RichText};
 use engine::{Command, Row, Update, Worker};
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
@@ -27,6 +27,7 @@ struct Starburst {
     searching: bool,
     ready: bool,
     filter: String,
+    search_rx: Option<std::sync::mpsc::Receiver<(Vec<indexer::Release>, Vec<String>)>>,
 }
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
     ui.label(RichText::new(label).color(Color32::from_gray(165)));
@@ -92,6 +93,7 @@ impl Starburst {
             searching: false,
             ready: false,
             filter: String::new(),
+            search_rx: None,
         }
     }
     fn send(&self, c: Command) {
@@ -157,13 +159,36 @@ impl Starburst {
                         remove = Some(n);
                     }
                 });
-                field(ui, "Display name", &mut i.name, false);
-                field(
-                    ui,
-                    "Newznab URL (https://indexer.example or its /api endpoint)",
-                    &mut i.url,
-                    false,
-                );
+                let selected = indexer::PRESETS.iter().position(|p| p.url == i.url);
+                let mut choice = selected;
+                egui::ComboBox::from_id_salt(("indexer-service", n))
+                    .selected_text(
+                        selected
+                            .map(|v| indexer::PRESETS[v].name)
+                            .unwrap_or("Custom Newznab"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (v, preset) in indexer::PRESETS.iter().enumerate() {
+                            ui.selectable_value(&mut choice, Some(v), preset.name);
+                        }
+                        ui.selectable_value(&mut choice, None, "Custom Newznab");
+                    });
+                if choice != selected {
+                    *i = choice
+                        .map(|v| indexer::preset_indexer(&indexer::PRESETS[v]))
+                        .unwrap_or_default();
+                }
+                if let Some(v) = choice {
+                    ui.hyperlink_to(
+                        "Open account website to find your API key",
+                        indexer::PRESETS[v].site,
+                    );
+                } else {
+                    field(ui, "Display name", &mut i.name, false);
+                }
+                if choice.is_none() {
+                    field(ui, "Newznab API URL", &mut i.url, false);
+                }
                 field(ui, "API key", &mut i.api_key, true);
             });
         }
@@ -171,7 +196,9 @@ impl Starburst {
             self.config.indexers.remove(n);
         }
         if ui.button("+ Add indexer").clicked() {
-            self.config.indexers.push(Indexer::default());
+            self.config
+                .indexers
+                .push(indexer::preset_indexer(&indexer::PRESETS[0]));
         }
         ui.add_space(18.0);
         card(ui, |ui| {
@@ -216,7 +243,7 @@ impl Starburst {
         }
     }
     fn search(&mut self, ui: &mut egui::Ui) {
-        ui.label("Search all your Newznab indexers in one place.");
+        ui.label("Select your indexer in Settings and paste its API key to search. A download provider is only needed to download files.");
         ui.add_space(18.0);
         let mut submit = false;
         ui.horizontal(|ui| {
@@ -232,13 +259,17 @@ impl Starburst {
                 submit = true;
             }
         });
-        if submit
-            && !self.query.trim().is_empty()
-            && !self.config.indexers.is_empty()
-            && self.worker.is_some()
-        {
+        if submit && !self.query.trim().is_empty() && !self.config.indexers.is_empty() {
             self.searching = true;
-            self.send(Command::Search(self.query.clone()));
+            let indexers = self.config.indexers.clone();
+            let query = self.query.clone();
+            let ctx = ui.ctx().clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.search_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(indexer::search_all(indexers, query));
+                ctx.request_repaint();
+            });
         }
         if self.config.indexers.is_empty() {
             ui.label("Add an indexer in Settings to start searching.");
@@ -270,6 +301,11 @@ impl Starburst {
             });
         }
         if let Some((url, name)) = download {
+            if self.worker.is_none() {
+                self.notice = "Add and save a Usenet download provider in Settings first.".into();
+                self.error = true;
+                return;
+            }
             self.send(Command::AddUrl(url, name));
             self.notice = "Fetching NZB…".into();
             self.error = false;
@@ -389,6 +425,19 @@ impl Starburst {
 }
 impl eframe::App for Starburst {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(rx) = &self.search_rx {
+            if let Ok((results, errors)) = rx.try_recv() {
+                self.notice = if errors.is_empty() {
+                    format!("Found {} results", results.len())
+                } else {
+                    errors.join("; ")
+                };
+                self.error = !errors.is_empty();
+                self.results = results;
+                self.searching = false;
+                self.search_rx = None;
+            }
+        }
         if let Some(w) = &self.worker {
             while let Ok(u) = w.rx.try_recv() {
                 match u {
@@ -404,10 +453,6 @@ impl eframe::App for Starburst {
                     Update::Error(m) => {
                         self.notice = m;
                         self.error = true;
-                    }
-                    Update::Results(r) => {
-                        self.results = r;
-                        self.searching = false;
                     }
                     Update::Queue(r) => self.rows = r,
                 }

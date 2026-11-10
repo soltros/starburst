@@ -1,13 +1,9 @@
-use crate::{
-    config::{self, Config},
-    indexer::{self, Release},
-};
+use crate::config::{self, Config};
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 use usenet_dl::{DownloadId, DownloadOptions, Status, UsenetDownloader};
 
 pub enum Command {
-    Search(String),
     AddUrl(String, String),
     AddFile(PathBuf),
     Pause(i64),
@@ -21,7 +17,6 @@ pub enum Update {
     Ready,
     Message(String),
     Error(String),
-    Results(Vec<Release>),
     Queue(Vec<Row>),
 }
 pub struct Row {
@@ -77,15 +72,6 @@ impl Worker {
                         let Some(command)=command else {break;};
                         if matches!(command,Command::Shutdown) { break; }
                         let result:Result<()>=async { match command {
-                            Command::Search(query)=> {
-                                let indexers=config.indexers.clone(); let updates=updates.clone(); let ctx=ctx.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    let client=reqwest::blocking::Client::builder().timeout(Duration::from_secs(25)).build();
-                                    let mut rows=vec![];
-                                    match client {Ok(client)=>for i in indexers {match indexer::search(&client,&i,&query) {Ok(mut r)=>rows.append(&mut r),Err(e)=>{let _=updates.send(Update::Error(format!("{}: {e}",i.name)));}}},Err(e)=>{let _=updates.send(Update::Error(e.to_string()));}}
-                                    let _=updates.send(Update::Results(rows)); ctx.request_repaint();
-                                });
-                            }
                             Command::AddUrl(url, name)=> {
                                 let d=downloader.clone();let updates=updates.clone();let ctx=ctx.clone();
                                 tokio::spawn(async move { let result=fetch_nzb(&url).await; match result {Ok(bytes)=>match d.add_nzb_content(&bytes,&name,DownloadOptions::default()).await {Ok(_)=>{let _=updates.send(Update::Message("Added to your queue".into()));},Err(e)=>{let _=updates.send(Update::Error(format!("Could not add NZB: {e}")));}},Err(e)=>{let _=updates.send(Update::Error(e.to_string()));}} ctx.request_repaint(); });

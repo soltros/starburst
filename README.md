@@ -2,7 +2,20 @@
 
 A native Linux Usenet desktop written in Rust. A quiet charcoal interface, warm amber accents, and one place for your providers, indexers, and downloads.
 
-## Run
+## Download (no build required)
+
+Get the latest **Starburst-linux-x86_64.AppImage** from [GitHub Releases](https://github.com/soltros/starburst/releases/latest).
+
+```bash
+chmod +x Starburst-linux-x86_64.AppImage
+./Starburst-linux-x86_64.AppImage
+```
+
+On NixOS, use `appimage-run Starburst-linux-x86_64.AppImage`. The AppImage includes PAR2 repair. A raw Linux binary and SHA256 checksums are also published.
+
+The **Linux release** Action builds and publishes a release after each push to `main`, on version tags (`v*`), or when run manually from the Actions page. Workflow artifacts remain available as a fallback. The release appears after the Action finishes successfully.
+
+## Build locally
 
 Install Nix, then:
 
@@ -24,8 +37,10 @@ The scripts enter the development shell automatically. The release binary uses d
 ## Getting started
 
 1. Open **Settings**, add your provider hostname, TLS port (usually 563), username, password, and connection allowance. Multiple providers are supported; lower priority values are tried first.
-2. Add your Newznab-compatible indexers: display name, base URL (or `/api` endpoint), and API key.
-3. Choose a download folder and save. Restart after changing existing connection or folder settings.
+2. Add an indexer, select **NZBGeek** (the default), **NZBPlanet**, **DrunkenSlug**, **NZBFinder**, or **altHUB**, and paste your API key. The API address is filled automatically. **Custom Newznab** accepts your own name and URL. Account website links help you find your key.
+3. Choose a download folder and save. Indexer keys and selections work immediately; restart after changing existing download provider connections or folder settings.
+
+Search works with an indexer API key alone, even before adding a download provider. Downloading requires your separate Usenet provider login.
 4. Use **Discover** to search all indexers and queue a result. Alternatively import an NZB, drop it into the window, or paste an NZB URL.
 5. Follow progress in **Downloads**; pause, resume, or cancel a job. Finished and failed jobs appear in **History**.
 
