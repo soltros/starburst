@@ -41,8 +41,9 @@ The scripts enter the development shell automatically. The release binary uses d
 3. Choose a download folder and save. Indexer keys and selections work immediately; restart after changing existing download provider connections or folder settings.
 
 Search works with an indexer API key alone, even before adding a download provider. Downloading requires your separate Usenet provider login.
-4. Use **Discover** to search all indexers and queue a result. Alternatively import an NZB, drop it into the window, or paste an NZB URL.
-5. Follow progress in **Downloads**; pause, resume, or cancel a job. Finished and failed jobs appear in **History**.
+4. Use **Test connection** on your provider and **Test API key** on each indexer to check the credentials. Results appear directly on each settings card; editing a field clears the old result. Indexer testing uses one real API search request.
+5. Use **Discover** to search all indexers and queue a result. Alternatively import an NZB, drop it into the window, or paste an NZB URL.
+6. Follow progress in **Downloads**; pause, resume, or cancel a job. Finished and failed jobs appear in **History**.
 
 Automatic post-processing verifies, repairs when possible, and extracts archives. Original archives are retained. PAR2 repair uses `par2`; the development shell provides it along with `7z` for extraction fallback. RAR extraction is also available through the library's bundled native bindings. Providers and indexers require your own accounts.
 
@@ -71,3 +72,5 @@ This is an initial implementation. It does not yet include streaming playback, R
 GPL-3.0-only; see [LICENSE](LICENSE). Dependencies retain their respective licenses.
 
 Inter is bundled under the SIL Open Font License; see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
+
+Search errors are shown in Discover beside the results. Invalid keys, account restrictions, HTTP errors, malformed replies, and missing download links are reported as failures rather than an empty result. RSS XML (including Newznab DOCTYPE declarations), JSON responses, and relative download links are supported.

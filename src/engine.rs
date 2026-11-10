@@ -50,7 +50,7 @@ impl Worker {
                 }
             };
             runtime.block_on(async {
-                let mut cfg=usenet_dl::Config { servers:config.providers.iter().map(|p|usenet_dl::ServerConfig { host:p.host.clone(),port:p.port,tls:p.tls,username:Some(p.username.clone()),password:Some(p.password.clone()),connections:p.connections as usize,priority:p.level as i32,pipeline_depth:10 }).collect(), ..Default::default() };
+                let mut cfg=usenet_dl::Config { servers:config.providers.iter().map(|p|usenet_dl::ServerConfig { host:p.host.trim().into(),port:p.port,tls:p.tls,username:Some(p.username.trim().into()),password:Some(p.password.clone()),connections:p.connections as usize,priority:p.level as i32,pipeline_depth:10 }).collect(), ..Default::default() };
                 cfg.download.download_dir=config.destination.clone();
                 cfg.download.temp_dir=config.destination.join(".incomplete");
                 cfg.download.default_post_process=if config.unpack {usenet_dl::config::PostProcess::Unpack} else {usenet_dl::config::PostProcess::None};

@@ -41,6 +41,7 @@ pub fn preset_indexer(preset: &Preset) -> Indexer {
 }
 pub fn search_all(indexers: Vec<Indexer>, query: String) -> (Vec<Release>, Vec<String>) {
     let client = match reqwest::blocking::Client::builder()
+        .user_agent(concat!("Starburst/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(25))
         .build()
     {
@@ -69,17 +70,23 @@ pub fn search(
     indexer: &Indexer,
     query: &str,
 ) -> Result<Vec<Release>> {
-    let mut url = reqwest::Url::parse(&indexer.url)?;
+    anyhow::ensure!(
+        !indexer.api_key.trim().is_empty(),
+        "Enter an API key in Settings first"
+    );
+    let mut url = reqwest::Url::parse(indexer.url.trim()).context("Invalid indexer URL")?;
     if !url.path().trim_end_matches('/').ends_with("/api") {
         url.set_path(&format!("{}/api", url.path().trim_end_matches('/')));
     }
     url.query_pairs_mut()
         .clear()
         .append_pair("t", "search")
-        .append_pair("q", query)
-        .append_pair("apikey", &indexer.api_key)
+        .append_pair("apikey", indexer.api_key.trim())
         .append_pair("limit", "100")
         .append_pair("o", "xml");
+    if !query.trim().is_empty() {
+        url.query_pairs_mut().append_pair("q", query.trim());
+    }
     // Deliberately omit request URLs from errors: they contain API keys.
     let response = client
         .get(url)
@@ -91,47 +98,162 @@ pub fn search(
     let text = response
         .text()
         .map_err(|_| anyhow::anyhow!("Could not read indexer response"))?;
-    parse(&text, &indexer.name)
+    parse_response(&text, &indexer.name, Some(&indexer.url))
+        .map_err(|e| anyhow::anyhow!(e.to_string().replace(indexer.api_key.trim(), "[redacted]")))
 }
+#[cfg(test)]
 pub fn parse(text: &str, source: &str) -> Result<Vec<Release>> {
-    let doc = roxmltree::Document::parse(text).context("Indexer returned invalid XML")?;
-    if let Some(e) = doc.descendants().find(|n| n.has_tag_name("error")) {
-        bail!(
-            "Indexer API error {}",
-            e.attribute("code").unwrap_or("unknown")
-        );
+    parse_response(text, source, None)
+}
+fn api_error(code: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        match code {
+            "100" => "Invalid API key. Copy the indexer's API key from your account settings.",
+            "101" | "102" => "Indexer account is suspended or not permitted to use the API.",
+            "910" => "Indexer API quota or download limit reached. Check your account limits.",
+            "200" | "201" | "202" => "Indexer rejected the search request or parameters.",
+            _ => "Indexer rejected the request. Check API access and account limits.",
+        }
+        .to_string()
+            + &format!(" (code {code})")
+    )
+}
+fn download_url(raw: &str, base: Option<&str>) -> Option<String> {
+    let url = reqwest::Url::parse(raw.trim())
+        .or_else(|_| reqwest::Url::parse(base.unwrap_or("")).and_then(|b| b.join(raw.trim())))
+        .ok()?;
+    ["https", "http"]
+        .contains(&url.scheme())
+        .then(|| url.to_string())
+}
+fn parse_response(text: &str, source: &str, base: Option<&str>) -> Result<Vec<Release>> {
+    if text.trim_start().starts_with('{') {
+        return parse_json(text, source, base);
     }
-    Ok(doc
-        .descendants()
-        .filter(|n| n.has_tag_name("item"))
-        .filter_map(|n| {
-            let title = n
-                .children()
-                .find(|n| n.has_tag_name("title"))?
-                .text()?
-                .to_owned();
-            let enclosure = n.children().find(|n| n.has_tag_name("enclosure"));
-            let raw = enclosure.and_then(|e| e.attribute("url")).or_else(|| {
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: 200_000,
+    };
+    let doc = roxmltree::Document::parse_with_options(text, options).map_err(|_| {
+        anyhow::anyhow!("Indexer returned invalid XML (possibly a login or error page)")
+    })?;
+    if let Some(e) = doc.descendants().find(|n| n.has_tag_name("error")) {
+        return Err(api_error(e.attribute("code").unwrap_or("unknown")));
+    }
+    anyhow::ensure!(
+        doc.root_element().has_tag_name("rss")
+            && doc.descendants().any(|n| n.has_tag_name("channel")),
+        "Indexer returned a page instead of a Newznab RSS feed. Check the API endpoint."
+    );
+    let mut rows = vec![];
+    let mut skipped = 0;
+    for n in doc.descendants().filter(|n| n.has_tag_name("item")) {
+        let title = n
+            .children()
+            .find(|n| n.has_tag_name("title"))
+            .and_then(|n| n.text())
+            .unwrap_or("Untitled release")
+            .to_owned();
+        let enclosure = n.children().find(|n| n.has_tag_name("enclosure"));
+        let raw = enclosure.and_then(|e| e.attribute("url")).or_else(|| {
+            n.children()
+                .find(|n| n.has_tag_name("link"))
+                .and_then(|n| n.text())
+        });
+        let Some(url) = raw.and_then(|u| download_url(u, base)) else {
+            skipped += 1;
+            continue;
+        };
+        let size = enclosure
+            .and_then(|e| e.attribute("length"))
+            .and_then(|v| v.parse().ok())
+            .or_else(|| {
                 n.children()
-                    .find(|n| n.has_tag_name("link"))
-                    .and_then(|n| n.text())
-            })?;
-            let url = reqwest::Url::parse(raw).ok()?;
-            if !["https", "http"].contains(&url.scheme()) {
-                return None;
-            }
+                    .find(|n| n.has_tag_name("attr") && n.attribute("name") == Some("size"))
+                    .and_then(|n| n.attribute("value"))
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(0);
+        rows.push(Release {
+            title,
+            url,
+            size,
+            source: source.into(),
+        });
+    }
+    anyhow::ensure!(
+        skipped == 0 || !rows.is_empty(),
+        "Indexer returned {skipped} releases, but none had usable download links"
+    );
+    Ok(rows)
+}
+fn parse_json(text: &str, source: &str, base: Option<&str>) -> Result<Vec<Release>> {
+    let json: serde_json::Value =
+        serde_json::from_str(text).context("Indexer returned invalid JSON")?;
+    if let Some(e) = json.get("error") {
+        return Err(api_error(
+            e.get("code")
+                .or_else(|| e.pointer("/@attributes/code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+        ));
+    }
+    let channel = json
+        .pointer("/rss/channel")
+        .or_else(|| json.get("channel"))
+        .context("Indexer returned JSON without a Newznab channel")?;
+    let Some(items) = channel.get("item") else {
+        return Ok(vec![]);
+    };
+    let entries = items
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| vec![items.clone()]);
+    let mut rows = vec![];
+    for item in &entries {
+        let enclosure = item
+            .get("enclosure")
+            .and_then(|v| v.get("@attributes").or(Some(v)));
+        let raw = enclosure
+            .and_then(|v| v.get("url"))
+            .or_else(|| item.get("link"))
+            .and_then(|v| v.as_str());
+        if let Some(url) = raw.and_then(|u| download_url(u, base)) {
             let size = enclosure
-                .and_then(|e| e.attribute("length"))
-                .and_then(|s| s.parse().ok())
+                .and_then(|v| v.get("length"))
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(0);
-            Some(Release {
-                title,
-                url: url.to_string(),
+            rows.push(Release {
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled release")
+                    .into(),
+                url,
                 size,
                 source: source.into(),
-            })
-        })
-        .collect())
+            });
+        }
+    }
+    anyhow::ensure!(
+        entries.is_empty() || !rows.is_empty(),
+        "Indexer returned releases without usable download links"
+    );
+    Ok(rows)
+}
+pub fn test(indexer: &Indexer) -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("Starburst/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(25))
+        .build()?;
+    let rows = search(&client, indexer, "")?;
+    Ok(format!(
+        "Search API accepted the key. Retrieved {} recent releases.",
+        rows.len()
+    ))
 }
 #[cfg(test)]
 mod tests {
@@ -149,12 +271,7 @@ mod tests {
     }
     #[test]
     fn rejects_non_http_links() {
-        assert!(parse(
-            "<rss><item><title>x</title><link>file:///etc/passwd</link></item></rss>",
-            "test"
-        )
-        .unwrap()
-        .is_empty());
+        assert!(parse("<rss><channel><item><title>x</title><link>file:///etc/passwd</link></item></channel></rss>","test").is_err());
     }
 }
 
@@ -198,5 +315,41 @@ mod http_tests {
         assert!(errors.is_empty());
         server.join().unwrap();
         assert_eq!(rows[0].size, 42);
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    #[test]
+    fn accepts_realistic_newznab_dtd_and_cdata() {
+        let xml = r#"<?xml version="1.0"?><!DOCTYPE rss SYSTEM "http://example.org/rss.dtd"><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel><item><title><![CDATA[Star Wars 2160p]]></title><enclosure url="https://example.org/get?id=1&amp;apikey=key" length="123456"/><newznab:attr name="size" value="123456"/></item></channel></rss>"#;
+        let rows = parse(xml, "NZBGeek").unwrap();
+        assert_eq!(rows[0].title, "Star Wars 2160p");
+        assert_eq!(rows[0].size, 123456);
+    }
+    #[test]
+    fn html_login_is_error_not_zero_results() {
+        assert!(parse("<html><body>Login required</body></html>", "test").is_err());
+    }
+    #[test]
+    fn errors_explain_invalid_key() {
+        assert!(parse(
+            r#"<error code="100" description="Invalid API Key"/>"#,
+            "test"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid API key"));
+    }
+    #[test]
+    fn accepts_json_single_item_and_relative_url() {
+        let rows=parse_response(r#"{"channel":{"item":{"title":"Star Wars","enclosure":{"@attributes":{"url":"/get?id=1","length":"42"}}}}}"#,"test",Some("https://example.org/api")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].url, "https://example.org/get?id=1");
+    }
+    #[test]
+    fn valid_empty_feed_is_empty() {
+        assert!(parse("<rss><channel/></rss>", "test").unwrap().is_empty());
     }
 }

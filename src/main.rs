@@ -1,4 +1,5 @@
 mod config;
+mod diagnostics;
 mod engine;
 mod indexer;
 mod ui;
@@ -28,6 +29,9 @@ struct Starburst {
     searching: bool,
     ready: bool,
     filter: String,
+    checks: diagnostics::Checks,
+    search_errors: Vec<String>,
+    search_finished: bool,
     search_rx: Option<std::sync::mpsc::Receiver<(Vec<indexer::Release>, Vec<String>)>>,
 }
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
@@ -88,6 +92,9 @@ impl Starburst {
             searching: false,
             ready: false,
             filter: String::new(),
+            checks: Default::default(),
+            search_errors: vec![],
+            search_finished: false,
             search_rx: None,
         }
     }
@@ -205,6 +212,12 @@ impl Starburst {
                         ui.label(RichText::new("Priority").color(ui::MUTED));
                         ui.add(egui::DragValue::new(&mut p.level).range(0..=99));
                     });
+                    diagnostics::control(
+                        ui,
+                        &mut self.checks,
+                        n,
+                        diagnostics::Service::Provider(p.clone()),
+                    );
                 });
             }
             if let Some(n) = remove {
@@ -274,6 +287,12 @@ impl Starburst {
                             indexer::PRESETS[v].site,
                         );
                     }
+                    diagnostics::control(
+                        ui,
+                        &mut self.checks,
+                        n,
+                        diagnostics::Service::Indexer(i.clone()),
+                    );
                 });
             }
             if let Some(n) = remove {
@@ -378,8 +397,15 @@ impl Starburst {
                 submit = true;
             }
         });
-        if submit && !self.query.trim().is_empty() && !self.config.indexers.is_empty() {
+        if submit
+            && !self.searching
+            && !self.query.trim().is_empty()
+            && !self.config.indexers.is_empty()
+        {
             self.searching = true;
+            self.search_finished = false;
+            self.search_errors.clear();
+            self.results.clear();
             let indexers = self.config.indexers.clone();
             let query = self.query.clone();
             let ctx = ui.ctx().clone();
@@ -400,7 +426,22 @@ impl Starburst {
             });
         }
         ui.add_space(12.0);
-        ui.label(format!("{} results", self.results.len()));
+        for error in &self.search_errors {
+            card(ui, |ui| {
+                ui.colored_label(Color32::LIGHT_RED, error);
+            });
+        }
+        if self.search_finished {
+            if self.results.is_empty() && !self.search_errors.is_empty() {
+                ui.label(
+                    "Search failed. Check the messages above and use Test API key in Settings.",
+                );
+            } else if self.results.is_empty() {
+                ui.label("Search completed successfully, but the indexers returned no matching releases.");
+            } else {
+                ui.label(format!("{} results", self.results.len()));
+            }
+        }
         let mut download = None;
         for r in &self.results {
             card(ui, |ui| {
@@ -578,16 +619,27 @@ impl Starburst {
 impl eframe::App for Starburst {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(rx) = &self.search_rx {
-            if let Ok((results, errors)) = rx.try_recv() {
-                self.notice = if errors.is_empty() {
-                    format!("Found {} results", results.len())
-                } else {
-                    errors.join("; ")
-                };
-                self.error = !errors.is_empty();
-                self.results = results;
-                self.searching = false;
-                self.search_rx = None;
+            match rx.try_recv() {
+                Ok((results, errors)) => {
+                    self.notice = if errors.is_empty() {
+                        format!("Found {} results", results.len())
+                    } else {
+                        errors.join("; ")
+                    };
+                    self.error = !errors.is_empty();
+                    self.search_errors = errors;
+                    self.search_finished = true;
+                    self.results = results;
+                    self.searching = false;
+                    self.search_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.search_errors = vec!["Search stopped unexpectedly. Please retry.".into()];
+                    self.search_finished = true;
+                    self.searching = false;
+                    self.search_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
         if let Some(w) = &self.worker {
@@ -682,7 +734,7 @@ impl eframe::App for Starburst {
                         );
                         ui.label(
                             RichText::new(if self.ready {
-                                "Connected"
+                                "Engine ready"
                             } else {
                                 "Ready to set up"
                             })
