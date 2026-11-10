@@ -1,6 +1,6 @@
 # Starburst
 
-A native Linux Usenet desktop written in Rust. A quiet charcoal interface, warm amber accents, and one place for your providers, indexers, and downloads.
+A native Linux Usenet desktop written in Rust. A quiet charcoal interface, warm amber accents, bundled Inter typography, and one place for your providers, indexers, and downloads. Navigation icons are drawn as vectors, with no dependency on system icon fonts.
 
 ## Download (no build required)
 
@@ -69,3 +69,5 @@ This is an initial implementation. It does not yet include streaming playback, R
 ## License
 
 GPL-3.0-only; see [LICENSE](LICENSE). Dependencies retain their respective licenses.
+
+Inter is bundled under the SIL Open Font License; see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).

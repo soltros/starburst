@@ -1,12 +1,13 @@
 mod config;
 mod engine;
 mod indexer;
+mod ui;
 use config::{Config, Provider};
 use eframe::egui::{self, Color32, RichText};
 use engine::{Command, Row, Update, Worker};
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+use ui::{Icon, ACCENT};
 use usenet_dl::Status;
-const ACCENT: Color32 = Color32::from_rgb(245, 171, 105);
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Downloads,
@@ -30,11 +31,12 @@ struct Starburst {
     search_rx: Option<std::sync::mpsc::Receiver<(Vec<indexer::Release>, Vec<String>)>>,
 }
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
-    ui.label(RichText::new(label).color(Color32::from_gray(165)));
+    ui.label(RichText::new(label).size(12.0).color(ui::MUTED));
     ui.add(
         egui::TextEdit::singleline(value)
             .password(secret)
-            .desired_width(f32::INFINITY),
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(12.0, 10.0)),
     );
     ui.add_space(7.0);
 }
@@ -46,28 +48,21 @@ fn bytes(n: u64) -> String {
     }
 }
 fn card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    let width = (ui.available_width() - 40.0).max(0.0);
     egui::Frame::none()
-        .fill(Color32::from_rgb(28, 30, 40))
+        .fill(ui::SURFACE)
+        .stroke(egui::Stroke::new(1.0_f32, ui::BORDER))
         .rounding(12.0)
-        .inner_margin(18.0)
-        .show(ui, body);
-    ui.add_space(10.0);
+        .inner_margin(20.0)
+        .show(ui, |ui| {
+            ui.set_min_width(width);
+            body(ui);
+        });
+    ui.add_space(14.0);
 }
 impl Starburst {
     fn new(cc: &eframe::CreationContext<'_>, config: Config, load_error: Option<String>) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = Color32::from_rgb(17, 19, 27);
-        style.visuals.window_fill = Color32::from_rgb(28, 30, 40);
-        style.visuals.selection.bg_fill = Color32::from_rgb(111, 72, 45);
-        style.visuals.widgets.active.bg_fill = ACCENT;
-        style.spacing.item_spacing = egui::vec2(12.0, 10.0);
-        style.spacing.button_padding = egui::vec2(16.0, 10.0);
-        style.visuals.widgets.inactive.rounding = 8.0.into();
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
-        cc.egui_ctx.set_style(style);
+        ui::theme(&cc.egui_ctx);
         let page = if config.providers.is_empty() {
             Page::Settings
         } else {
@@ -109,147 +104,271 @@ impl Starburst {
             self.send(Command::AddFile(path));
         }
     }
-    fn settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label("Connect your Usenet services. Credentials are stored locally with owner-only permissions.");
-        ui.add_space(14.0);
-        let mut remove = None;
-        for (n, p) in self.config.providers.iter_mut().enumerate() {
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(format!("Provider {}", n + 1));
-                    if ui.small_button("Remove").clicked() {
-                        remove = Some(n);
-                    }
-                });
-                field(ui, "Display name", &mut p.name, false);
-                field(ui, "Server hostname", &mut p.host, false);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut p.tls, "TLS encryption");
-                    ui.label("Port");
-                    ui.add(egui::DragValue::new(&mut p.port).range(1..=65535));
-                    ui.label("Connections");
-                    ui.add(egui::DragValue::new(&mut p.connections).range(1..=100));
-                    ui.label("Priority");
-                    ui.add(egui::DragValue::new(&mut p.level).range(0..=99));
-                });
-                field(ui, "Username", &mut p.username, false);
-                field(ui, "Password", &mut p.password, true);
-            });
-        }
-        if let Some(n) = remove {
-            self.config.providers.remove(n);
-        }
-        if ui.button("+ Add provider").clicked() {
-            self.config.providers.push(Provider::default());
-        }
-        ui.label(
-            RichText::new(
-                "Lower priority numbers are tried first; higher numbers are backup providers.",
-            )
-            .small()
-            .weak(),
-        );
-        ui.add_space(18.0);
-        let mut remove = None;
-        for (n, i) in self.config.indexers.iter_mut().enumerate() {
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(format!("Indexer {}", n + 1));
-                    if ui.small_button("Remove").clicked() {
-                        remove = Some(n);
-                    }
-                });
-                let selected = indexer::PRESETS.iter().position(|p| p.url == i.url);
-                let mut choice = selected;
-                egui::ComboBox::from_id_salt(("indexer-service", n))
-                    .selected_text(
-                        selected
-                            .map(|v| indexer::PRESETS[v].name)
-                            .unwrap_or("Custom Newznab"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (v, preset) in indexer::PRESETS.iter().enumerate() {
-                            ui.selectable_value(&mut choice, Some(v), preset.name);
-                        }
-                        ui.selectable_value(&mut choice, None, "Custom Newznab");
-                    });
-                if choice != selected {
-                    *i = choice
-                        .map(|v| indexer::preset_indexer(&indexer::PRESETS[v]))
-                        .unwrap_or_default();
+    fn save_settings(&mut self, ctx: &egui::Context) {
+        match self.config.save() {
+            Ok(()) => {
+                self.error = false;
+                self.notice = "Saved. Indexers are ready; restart to apply changes to existing download connections.".into();
+                if self.worker.is_none() && !self.config.providers.is_empty() {
+                    self.worker = Some(Worker::start(self.config.clone(), ctx.clone()));
                 }
-                if let Some(v) = choice {
-                    ui.hyperlink_to(
-                        "Open account website to find your API key",
-                        indexer::PRESETS[v].site,
+            }
+            Err(e) => {
+                self.error = true;
+                self.notice = e.to_string();
+            }
+        }
+    }
+    fn settings(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        if self.config.providers.is_empty() && self.config.indexers.is_empty() {
+            let mut add_provider = false;
+            let mut add_indexer = false;
+            if ui.available_width() >= 750.0 {
+                ui.columns(2, |columns| {
+                    add_provider = ui::empty(
+                        &mut columns[0],
+                        Icon::Server,
+                        "Your download provider",
+                        "Connect the service that stores and delivers your files.",
+                        "Add provider",
                     );
-                } else {
-                    field(ui, "Display name", &mut i.name, false);
-                }
-                if choice.is_none() {
-                    field(ui, "Newznab API URL", &mut i.url, false);
-                }
-                field(ui, "API key", &mut i.api_key, true);
-            });
+                    add_indexer = ui::empty(
+                        &mut columns[1],
+                        Icon::Search,
+                        "Your search, connected",
+                        "Choose NZBGeek or another indexer, then paste your API key.",
+                        "Add indexer",
+                    );
+                });
+            } else {
+                add_provider = ui::empty(
+                    ui,
+                    Icon::Server,
+                    "Your download provider",
+                    "Connect the service that delivers your files.",
+                    "Add provider",
+                );
+                add_indexer = ui::empty(
+                    ui,
+                    Icon::Search,
+                    "Your search, connected",
+                    "Choose an indexer and paste your API key.",
+                    "Add indexer",
+                );
+            }
+            if add_provider {
+                self.config.providers.push(Provider::default());
+            }
+            if add_indexer {
+                self.config
+                    .indexers
+                    .push(indexer::preset_indexer(&indexer::PRESETS[0]));
+            }
+        } else {
+            ui::section(
+                ui,
+                Icon::Server,
+                "Usenet providers",
+                "Your download connections. Lower priority numbers are tried first.",
+            );
+            let mut remove = None;
+            for (n, p) in self.config.providers.iter_mut().enumerate() {
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Connection {}", n + 1))
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(n);
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    ui.columns(2, |c| {
+                        field(&mut c[0], "Display name", &mut p.name, false);
+                        field(&mut c[1], "Server hostname", &mut p.host, false);
+                    });
+                    ui.columns(2, |c| {
+                        field(&mut c[0], "Username", &mut p.username, false);
+                        field(&mut c[1], "Password", &mut p.password, true);
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut p.tls, "TLS encryption");
+                        ui.separator();
+                        ui.label(RichText::new("Port").color(ui::MUTED));
+                        ui.add(egui::DragValue::new(&mut p.port).range(1..=65535));
+                        ui.label(RichText::new("Connections").color(ui::MUTED));
+                        ui.add(egui::DragValue::new(&mut p.connections).range(1..=100));
+                        ui.label(RichText::new("Priority").color(ui::MUTED));
+                        ui.add(egui::DragValue::new(&mut p.level).range(0..=99));
+                    });
+                });
+            }
+            if let Some(n) = remove {
+                self.config.providers.remove(n);
+            }
+            if ui.button("Add provider").clicked() {
+                self.config.providers.push(Provider::default());
+            }
+            ui.add_space(22.0);
+            ui::section(
+                ui,
+                Icon::Search,
+                "Search indexers",
+                "Connect an API key to find releases across your services.",
+            );
+            let mut remove = None;
+            for (n, i) in self.config.indexers.iter_mut().enumerate() {
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(if i.name.is_empty() {
+                                "Custom indexer"
+                            } else {
+                                &i.name
+                            })
+                            .size(16.0)
+                            .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(n);
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    let selected = indexer::PRESETS.iter().position(|p| p.url == i.url);
+                    let mut choice = selected;
+                    ui.label(RichText::new("Service").size(12.0).color(ui::MUTED));
+                    egui::ComboBox::from_id_salt(("indexer-service", n))
+                        .width(ui.available_width() - 16.0)
+                        .selected_text(
+                            selected
+                                .map(|v| indexer::PRESETS[v].name)
+                                .unwrap_or("Custom Newznab"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (v, p) in indexer::PRESETS.iter().enumerate() {
+                                ui.selectable_value(&mut choice, Some(v), p.name);
+                            }
+                            ui.selectable_value(&mut choice, None, "Custom Newznab");
+                        });
+                    if choice != selected {
+                        *i = choice
+                            .map(|v| indexer::preset_indexer(&indexer::PRESETS[v]))
+                            .unwrap_or_default();
+                    }
+                    if choice.is_none() {
+                        ui.columns(2, |c| {
+                            field(&mut c[0], "Display name", &mut i.name, false);
+                            field(&mut c[1], "Newznab API URL", &mut i.url, false);
+                        });
+                    }
+                    field(ui, "API key", &mut i.api_key, true);
+                    if let Some(v) = choice {
+                        ui.hyperlink_to(
+                            "Find your API key on the account website",
+                            indexer::PRESETS[v].site,
+                        );
+                    }
+                });
+            }
+            if let Some(n) = remove {
+                self.config.indexers.remove(n);
+            }
+            if ui.button("Add indexer").clicked() {
+                self.config
+                    .indexers
+                    .push(indexer::preset_indexer(&indexer::PRESETS[0]));
+            }
         }
-        if let Some(n) = remove {
-            self.config.indexers.remove(n);
-        }
-        if ui.button("+ Add indexer").clicked() {
-            self.config
-                .indexers
-                .push(indexer::preset_indexer(&indexer::PRESETS[0]));
-        }
-        ui.add_space(18.0);
+        ui.add_space(24.0);
+        ui::section(
+            ui,
+            Icon::Folder,
+            "Storage & processing",
+            "Choose where your downloads land. Starburst takes care of the rest.",
+        );
         card(ui, |ui| {
-            ui.heading("Files & folders");
+            ui.label(RichText::new("Download folder").size(12.0).color(ui::MUTED));
             ui.horizontal(|ui| {
-                ui.label(self.config.destination.display().to_string());
-                if ui.button("Choose folder").clicked() {
+                let path_width = (ui.available_width() - 110.0).max(120.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(path_width, 38.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(self.config.destination.display().to_string())
+                                .truncate(),
+                        );
+                    },
+                );
+                if ui.button("Browse…").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.config.destination = p;
                     }
                 }
             });
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
             ui.checkbox(
                 &mut self.config.unpack,
-                "Automatically verify, repair and unpack downloads",
+                "Automatically verify, repair and unpack",
             );
-            ui.label(RichText::new("Archives are kept after extraction. Settings changes take effect after restarting Starburst.").small().weak());
+            ui.label(
+                RichText::new("Original archives are kept after extraction.")
+                    .size(12.0)
+                    .color(ui::MUTED),
+            );
         });
-        if ui
-            .add(
-                egui::Button::new(RichText::new("Save settings").color(Color32::BLACK))
-                    .fill(ACCENT),
-            )
-            .clicked()
-        {
-            match self.config.save() {
-                Ok(()) => {
-                    self.error = false;
-                    self.notice =
-                        "Settings saved. Restart Starburst to apply connection or folder changes."
-                            .into();
-                    if self.worker.is_none() && !self.config.providers.is_empty() {
-                        self.worker = Some(Worker::start(self.config.clone(), ctx.clone()));
-                        self.notice = "Settings saved. Connecting to your providers…".into();
-                    }
-                }
-                Err(e) => {
-                    self.error = true;
-                    self.notice = e.to_string();
-                }
-            }
-        }
+        ui.label(
+            RichText::new("Credentials stay on this device in an owner-only settings file.")
+                .size(12.0)
+                .color(ui::MUTED),
+        );
     }
     fn search(&mut self, ui: &mut egui::Ui) {
-        ui.label("Select your indexer in Settings and paste its API key to search. A download provider is only needed to download files.");
+        if self.config.indexers.is_empty() {
+            if ui::empty(
+                ui,
+                Icon::Search,
+                "Find your next discovery",
+                "Connect NZBGeek or another indexer with your API key to search from here.",
+                "Connect an indexer",
+            ) {
+                self.page = Page::Settings;
+                self.config
+                    .indexers
+                    .push(indexer::preset_indexer(&indexer::PRESETS[0]));
+            }
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            for indexer in &self.config.indexers {
+                egui::Frame::none()
+                    .fill(ui::SURFACE)
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(&indexer.name).size(12.0).color(ACCENT));
+                    });
+            }
+        });
+        ui.add_space(10.0);
+
+        ui.label(RichText::new("Search by title across your connected services.").color(ui::MUTED));
         ui.add_space(18.0);
         let mut submit = false;
         ui.horizontal(|ui| {
             let r = ui.add_sized(
                 [ui.available_width() - 110.0, 40.0],
-                egui::TextEdit::singleline(&mut self.query).hint_text("What are you looking for?"),
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("What are you looking for?")
+                    .margin(egui::vec2(12.0, 10.0)),
             );
             submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui
@@ -286,14 +405,18 @@ impl Starburst {
         for r in &self.results {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&r.title).strong());
-                        ui.label(
-                            RichText::new(format!("{}  ·  {}", r.source, bytes(r.size)))
-                                .small()
-                                .weak(),
-                        );
-                    });
+                    ui.allocate_ui_with_layout(
+                        egui::vec2((ui.available_width() - 125.0).max(120.0), 44.0),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.add(egui::Label::new(RichText::new(&r.title).strong()).truncate());
+                            ui.label(
+                                RichText::new(format!("{}  ·  {}", r.source, bytes(r.size)))
+                                    .small()
+                                    .weak(),
+                            );
+                        },
+                    );
                     if ui.button("Download").clicked() {
                         download = Some((r.url.clone(), format!("{}.nzb", r.title)));
                     }
@@ -313,8 +436,38 @@ impl Starburst {
     }
     fn downloads(&mut self, ui: &mut egui::Ui, history: bool) {
         if !history {
+            let active = self
+                .rows
+                .iter()
+                .filter(|r| r.status == Status::Downloading)
+                .count();
+            let speed: u64 = self
+                .rows
+                .iter()
+                .filter(|r| r.status == Status::Downloading)
+                .map(|r| r.speed)
+                .sum();
+            let complete = self
+                .rows
+                .iter()
+                .filter(|r| r.status == Status::Complete)
+                .count();
+            ui.columns(3, |columns| {
+                for (column, (title, value)) in columns.iter_mut().zip([
+                    ("DOWNLOADING", active.to_string()),
+                    ("TRANSFER RATE", format!("{}/s", bytes(speed))),
+                    ("COMPLETED", complete.to_string()),
+                ]) {
+                    card(column, |ui| {
+                        ui.label(RichText::new(title).size(10.0).color(ui::MUTED));
+                        ui.label(RichText::new(value).size(24.0).color(ui::TEXT));
+                    });
+                }
+            });
+        }
+        if !history {
             ui.horizontal(|ui| {
-                if ui.button("+ Import NZB").clicked() {
+                if ui.button("Import NZB").clicked() {
                     self.import();
                 }
                 if ui.button("Pause all").clicked() {
@@ -328,7 +481,8 @@ impl Starburst {
                 ui.add_sized(
                     [ui.available_width() - 100.0, 34.0],
                     egui::TextEdit::singleline(&mut self.url)
-                        .hint_text("Or paste an NZB download URL…"),
+                        .hint_text("Or paste an NZB download URL…")
+                        .margin(egui::vec2(12.0, 10.0)),
                 );
                 if ui.button("Add URL").clicked() && !self.url.trim().is_empty() {
                     self.send(Command::AddUrl(
@@ -340,19 +494,6 @@ impl Starburst {
             });
         }
         field(ui, "Filter downloads", &mut self.filter, false);
-        let speed: u64 = self
-            .rows
-            .iter()
-            .filter(|r| r.status == Status::Downloading)
-            .map(|r| r.speed)
-            .sum();
-        if !history {
-            ui.label(
-                RichText::new(format!("{} /s  ·  automatic repair & unpack", bytes(speed)))
-                    .color(ACCENT),
-            );
-            ui.add_space(14.0);
-        }
         let mut action = None;
         let mut count = 0;
         for r in &self.rows {
@@ -405,6 +546,17 @@ impl Starburst {
         if count == 0 {
             ui.add_space(50.0);
             ui.vertical_centered(|ui| {
+                ui::icon(
+                    ui,
+                    if history {
+                        Icon::History
+                    } else {
+                        Icon::Download
+                    },
+                    44.0,
+                    ACCENT,
+                );
+                ui.add_space(18.0);
                 ui.label(
                     RichText::new(if history {
                         "A fresh start."
@@ -417,7 +569,7 @@ impl Starburst {
                 ui.label(if history {
                     "Completed and failed downloads will appear here."
                 } else {
-                    "Search your indexers or drop an NZB file into this window."
+                    "Drop an NZB here, import a file, or find your next download in Discover."
                 });
             });
         }
@@ -467,86 +619,181 @@ impl eframe::App for Starburst {
             }
         }
         egui::SidePanel::left("navigation")
-            .exact_width(210.0)
+            .exact_width(224.0)
+            .resizable(false)
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(22, 24, 34))
-                    .inner_margin(22.0),
+                    .fill(egui::Color32::from_rgb(20, 24, 33))
+                    .inner_margin(18.0),
             )
             .show(ctx, |ui| {
                 ui.add_space(16.0);
-                ui.label(RichText::new("✦").size(44.0).color(ACCENT));
-                ui.label(RichText::new("Starburst").size(26.0).strong());
-                ui.label(RichText::new("A brighter way to Usenet").size(12.0).weak());
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 11.0, Color32::from_rgb(61, 45, 35));
+                    ui::paint_icon(ui.painter(), rect.shrink(7.0), Icon::Spark, ACCENT);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Starburst").size(21.0).strong());
+                        ui.label(
+                            RichText::new("USENET, SIMPLIFIED")
+                                .size(9.0)
+                                .color(ui::MUTED),
+                        );
+                    });
+                });
                 ui.add_space(42.0);
-                for (page, label) in [
-                    (Page::Downloads, "↓  Downloads"),
-                    (Page::Search, "⌕  Discover"),
-                    (Page::History, "◷  History"),
-                    (Page::Settings, "⚙  Settings"),
+                ui.label(RichText::new("WORKSPACE").size(10.0).color(ui::MUTED));
+                ui.add_space(6.0);
+                for (page, kind, label) in [
+                    (Page::Downloads, Icon::Download, "Downloads"),
+                    (Page::Search, Icon::Search, "Discover"),
+                    (Page::History, Icon::History, "History"),
                 ] {
-                    if ui
-                        .add_sized(
-                            [166.0, 44.0],
-                            egui::Button::new(label).selected(self.page == page),
-                        )
-                        .clicked()
-                    {
+                    if ui::nav(ui, kind, label, self.page == page).clicked() {
                         self.page = page;
                     }
                 }
+                ui.add_space(24.0);
+                ui.label(RichText::new("PREFERENCES").size(10.0).color(ui::MUTED));
+                ui.add_space(6.0);
+                if ui::nav(ui, Icon::Settings, "Settings", self.page == Page::Settings).clicked() {
+                    self.page = Page::Settings;
+                }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("STARBURST  /  0.1.0").small().weak());
-                    ui.label(if self.ready {
-                        "● Engine ready"
-                    } else {
-                        "○ Configure your providers"
+                    ui.label(
+                        RichText::new(concat!("Starburst  /  ", env!("CARGO_PKG_VERSION")))
+                            .size(11.0)
+                            .color(ui::MUTED),
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8., 8.), egui::Sense::hover());
+                        ui.painter().circle_filled(
+                            rect.center(),
+                            3.0,
+                            if self.ready {
+                                Color32::from_rgb(133, 209, 167)
+                            } else {
+                                ACCENT
+                            },
+                        );
+                        ui.label(
+                            RichText::new(if self.ready {
+                                "Connected"
+                            } else {
+                                "Ready to set up"
+                            })
+                            .size(12.0)
+                            .color(ui::MUTED),
+                        );
                     });
+                    ui.separator();
                 });
             });
-        egui::TopBottomPanel::bottom("notice").show(ctx, |ui| {
-            ui.add_space(7.0);
-            ui.colored_label(
-                if self.error {
-                    Color32::LIGHT_RED
-                } else {
-                    Color32::from_gray(170)
-                },
-                &self.notice,
-            );
-            ui.add_space(7.0);
-        });
+        egui::TopBottomPanel::bottom("notice")
+            .frame(
+                egui::Frame::none()
+                    .fill(ui::BG)
+                    .inner_margin(egui::Margin::symmetric(28., 12.)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(6., 6.), egui::Sense::hover());
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        3.,
+                        if self.error {
+                            Color32::LIGHT_RED
+                        } else {
+                            ACCENT
+                        },
+                    );
+                    ui.label(RichText::new(&self.notice).size(12.).color(if self.error {
+                        Color32::LIGHT_RED
+                    } else {
+                        ui::MUTED
+                    }));
+                });
+            });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 19, 27))
-                    .inner_margin(32.0),
+                    .fill(ui::BG)
+                    .inner_margin(egui::Margin::symmetric(36., 30.)),
             )
             .show(ctx, |ui| {
-                ui.label(
-                    RichText::new("YOUR PERSONAL USENET DESKTOP")
-                        .size(11.0)
-                        .color(ACCENT),
+                let width = ui.available_width().min(1100.0);
+                let inset = (ui.available_width() - width) * 0.5;
+                let content_rect = egui::Rect::from_min_size(
+                    ui.cursor().min + egui::vec2(inset, 0.0),
+                    egui::vec2(width, ui.available_height()),
                 );
-                ui.add_space(8.0);
-                ui.heading(
-                    RichText::new(match self.page {
-                        Page::Downloads => "Downloads",
-                        Page::Search => "Discover",
-                        Page::History => "History",
-                        Page::Settings => "Make yourself at home.",
-                    })
-                    .size(34.0),
-                );
-                ui.add_space(22.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    match self.page {
-                        Page::Settings => self.settings(ui, ctx),
-                        Page::Search => self.search(ui),
-                        Page::Downloads => self.downloads(ui, false),
-                        Page::History => self.downloads(ui, true),
-                    }
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                    ui.set_width(width);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(match self.page {
+                                    Page::Downloads => "Your downloads",
+                                    Page::Search => "Discover something new",
+                                    Page::History => "Download history",
+                                    Page::Settings => "Settings",
+                                })
+                                .size(30.0)
+                                .strong()
+                                .color(ui::TEXT),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(match self.page {
+                                    Page::Downloads => {
+                                        "From your indexers to your library, without the busywork."
+                                    }
+                                    Page::Search => "One search. All your connected indexers.",
+                                    Page::History => {
+                                        "A record of everything that has come through Starburst."
+                                    }
+                                    Page::Settings => {
+                                        "Your services, your files. Everything in its place."
+                                    }
+                                })
+                                .color(ui::MUTED),
+                            );
+                        });
+                        if self.page == Page::Settings {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui::primary(ui, "Save changes").clicked() {
+                                        self.save_settings(ctx);
+                                    }
+                                },
+                            );
+                        }
+                    });
+                    ui.add_space(24.0);
+                    ui.separator();
+                    ui.add_space(22.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(match self.page {
+                            Page::Downloads => "downloads",
+                            Page::Search => "discover",
+                            Page::History => "history",
+                            Page::Settings => "settings",
+                        })
+                        .show(ui, |ui| {
+                            ui.set_width(width);
+                            match self.page {
+                                Page::Settings => self.settings(ui, ctx),
+                                Page::Search => self.search(ui),
+                                Page::Downloads => self.downloads(ui, false),
+                                Page::History => self.downloads(ui, true),
+                            }
+                        });
                 });
             });
     }
