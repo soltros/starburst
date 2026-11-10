@@ -576,10 +576,19 @@ fn main() -> anyhow::Result<()> {
             )),
         ),
     };
+    let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
+    let (width, height) = icon.dimensions();
+    let icon = egui::IconData {
+        rgba: icon.into_raw(),
+        width,
+        height,
+    };
     eframe::run_native(
         "Starburst",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(icon)
+                .with_app_id("io.github.soltros.Starburst")
                 .with_inner_size([1120.0, 780.0])
                 .with_min_inner_size([820.0, 600.0]),
             ..Default::default()
