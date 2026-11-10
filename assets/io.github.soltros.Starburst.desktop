@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Starburst
+Comment=A brighter way to Usenet
+Exec=starburst
+Icon=io.github.soltros.Starburst
+Terminal=false
+Categories=Network;FileTransfer;
+MimeType=application/x-nzb;
