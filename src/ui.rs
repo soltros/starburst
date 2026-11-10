@@ -19,7 +19,7 @@ pub fn theme(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "Inter".into(),
-        egui::FontData::from_static(include_bytes!("../assets/fonts/Inter.ttf")),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf")),
     );
     fonts
         .families
@@ -61,9 +61,9 @@ pub fn theme(ctx: &egui::Context) {
     style.spacing.interact_size.y = 36.0;
     style.spacing.scroll.bar_width = 5.0;
     for (kind, size) in [
-        (egui::TextStyle::Body, 14.0),
+        (egui::TextStyle::Body, 15.0),
         (egui::TextStyle::Button, 14.0),
-        (egui::TextStyle::Small, 12.0),
+        (egui::TextStyle::Small, 13.0),
         (egui::TextStyle::Heading, 20.0),
     ] {
         style.text_styles.insert(kind, FontId::proportional(size));
@@ -230,4 +230,55 @@ pub fn empty(ui: &mut egui::Ui, kind: Icon, title: &str, description: &str, acti
         ui.add_space(8.);
     });
     clicked
+}
+
+/// Keep release identifiers for downloading; present the title separately from encoding details.
+pub fn release_title(raw: &str) -> (String, String) {
+    let tokens: Vec<&str> = raw
+        .split(['.', '_', ' '])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let quality = tokens.iter().position(|s| {
+        ["480p", "576p", "720p", "1080p", "1080i", "2160p", "4320p"]
+            .iter()
+            .any(|q| s.eq_ignore_ascii_case(q))
+    });
+    match quality {
+        Some(split) if split > 0 => (tokens[..split].join(" "), {
+            let offset = raw
+                .to_ascii_lowercase()
+                .find(&tokens[split].to_ascii_lowercase())
+                .unwrap_or(0);
+            let chars: Vec<char> = raw[offset..].chars().collect();
+            chars
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| {
+                    if c == '_'
+                        || (c == '.'
+                            && !(i > 0
+                                && i + 1 < chars.len()
+                                && chars[i - 1].is_ascii_digit()
+                                && chars[i + 1].is_ascii_digit()))
+                    {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect::<String>()
+        }),
+        _ => (tokens.join(" "), String::new()),
+    }
+}
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    #[test]
+    fn separates_technical_details_without_losing_episode() {
+        let (title, details) =
+            release_title("Star.Wars.The.Bad.Batch.S01E03.Replacements.2160p.WEB-DL.H265-SPWEB");
+        assert_eq!(title, "Star Wars The Bad Batch S01E03 Replacements");
+        assert_eq!(details, "2160p WEB-DL H265-SPWEB");
+    }
 }

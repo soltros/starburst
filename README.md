@@ -74,3 +74,7 @@ GPL-3.0-only; see [LICENSE](LICENSE). Dependencies retain their respective licen
 Inter is bundled under the SIL Open Font License; see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
 
 Search errors are shown in Discover beside the results. Invalid keys, account restrictions, HTTP errors, malformed replies, and missing download links are reported as failures rather than an empty result. RSS XML (including Newznab DOCTYPE declarations), JSON responses, and relative download links are supported.
+
+Discover includes standard Newznab category filters (Movies, TV, Music, Books, Apps, Games, Other, and Adult), plus subcategories such as HD and UHD. Category choices are sent as `cat` in API requests. A blank search browses recent releases. Filters remain visible while scrolling results. Indexers can differ in the categories they support.
+
+Result titles are presented separately from encoding details; hover a title to see the original release name, or right-click to copy it. Downloads retain the original name.

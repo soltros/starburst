@@ -1,3 +1,4 @@
+mod categories;
 mod config;
 mod diagnostics;
 mod engine;
@@ -21,6 +22,9 @@ struct Starburst {
     worker: Option<Worker>,
     page: Page,
     query: String,
+    category_root: u32,
+    category_sub: u32,
+    searched_category: u32,
     url: String,
     results: Vec<indexer::Release>,
     rows: Vec<Row>,
@@ -82,6 +86,9 @@ impl Starburst {
             worker,
             page,
             query: String::new(),
+            category_root: 0,
+            category_sub: 0,
+            searched_category: 0,
             url: String::new(),
             results: vec![],
             rows: vec![],
@@ -366,22 +373,57 @@ impl Starburst {
             }
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            for indexer in &self.config.indexers {
-                egui::Frame::none()
-                    .fill(ui::SURFACE)
-                    .rounding(6.0)
-                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(&indexer.name).size(12.0).color(ACCENT));
-                    });
-            }
-        });
-        ui.add_space(10.0);
-
-        ui.label(RichText::new("Search by title across your connected services.").color(ui::MUTED));
-        ui.add_space(18.0);
         let mut submit = false;
+        ui.add_enabled_ui(!self.searching, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for &(id, label) in categories::ROOTS {
+                    if ui
+                        .selectable_label(self.category_root == id, label)
+                        .clicked()
+                        && self.category_root != id
+                    {
+                        self.category_root = id;
+                        self.category_sub = 0;
+                        submit = true;
+                    }
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Category").size(13.0).color(ui::MUTED));
+                let previous = self.category_sub;
+                egui::ComboBox::from_id_salt("subcategory")
+                    .width(210.0)
+                    .selected_text(if self.category_sub == 0 {
+                        categories::name(self.category_root)
+                    } else {
+                        categories::name(self.category_sub)
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.category_sub,
+                            0,
+                            if self.category_root == 0 {
+                                "All categories".into()
+                            } else {
+                                format!("All {}", categories::name(self.category_root))
+                            },
+                        );
+                        for &(id, name) in categories::children(self.category_root) {
+                            ui.selectable_value(&mut self.category_sub, id, name);
+                        }
+                    });
+                if self.category_sub != previous {
+                    submit = true;
+                }
+                ui.label(
+                    RichText::new("Leave the title blank to browse recent releases.")
+                        .size(12.0)
+                        .color(ui::MUTED),
+                );
+            });
+        });
+        ui.add_space(14.0);
         ui.horizontal(|ui| {
             let r = ui.add_sized(
                 [ui.available_width() - 110.0, 40.0],
@@ -389,7 +431,7 @@ impl Starburst {
                     .hint_text("What are you looking for?")
                     .margin(egui::vec2(12.0, 10.0)),
             );
-            submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui
                 .add_enabled(!self.searching, egui::Button::new("Search"))
                 .clicked()
@@ -397,22 +439,24 @@ impl Starburst {
                 submit = true;
             }
         });
-        if submit
-            && !self.searching
-            && !self.query.trim().is_empty()
-            && !self.config.indexers.is_empty()
-        {
+        if submit && !self.searching && !self.config.indexers.is_empty() {
             self.searching = true;
             self.search_finished = false;
             self.search_errors.clear();
             self.results.clear();
             let indexers = self.config.indexers.clone();
             let query = self.query.clone();
+            let category = if self.category_sub == 0 {
+                self.category_root
+            } else {
+                self.category_sub
+            };
+            self.searched_category = category;
             let ctx = ui.ctx().clone();
             let (tx, rx) = std::sync::mpsc::channel();
             self.search_rx = Some(rx);
             std::thread::spawn(move || {
-                let _ = tx.send(indexer::search_all(indexers, query));
+                let _ = tx.send(indexer::search_all(indexers, query, category));
                 ctx.request_repaint();
             });
         }
@@ -439,31 +483,97 @@ impl Starburst {
             } else if self.results.is_empty() {
                 ui.label("Search completed successfully, but the indexers returned no matching releases.");
             } else {
-                ui.label(format!("{} results", self.results.len()));
+                ui.label(
+                    RichText::new(format!(
+                        "{} releases  /  {}",
+                        self.results.len(),
+                        categories::name(self.searched_category)
+                    ))
+                    .size(13.0)
+                    .color(ui::MUTED),
+                );
             }
         }
         let mut download = None;
-        for r in &self.results {
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2((ui.available_width() - 125.0).max(120.0), 44.0),
-                        egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| {
-                            ui.add(egui::Label::new(RichText::new(&r.title).strong()).truncate());
-                            ui.label(
-                                RichText::new(format!("{}  ·  {}", r.source, bytes(r.size)))
-                                    .small()
-                                    .weak(),
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .id_salt("release-results")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for r in &self.results {
+                    let (title, details) = ui::release_title(&r.title);
+                    let width = ui.available_width();
+                    egui::Frame::none()
+                        .fill(ui::SURFACE)
+                        .stroke(egui::Stroke::new(1.0_f32, ui::BORDER))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width((width - 36.0).max(0.0));
+                            let bounds = ui.max_rect();
+                            let button = egui::Rect::from_center_size(
+                                egui::pos2(bounds.right() - 51.0, bounds.top() + 31.0),
+                                egui::vec2(102.0, 36.0),
                             );
-                        },
-                    );
-                    if ui.button("Download").clicked() {
-                        download = Some((r.url.clone(), format!("{}.nzb", r.title)));
-                    }
-                });
+                            let text_width = (bounds.width() - 124.0).max(120.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(text_width, 62.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    let response = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(title).size(16.0).color(ui::TEXT),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&r.title);
+                                    response.context_menu(|ui| {
+                                        if ui.button("Copy original release name").clicked() {
+                                            ui.output_mut(|o| o.copied_text = r.title.clone());
+                                            ui.close_menu();
+                                        }
+                                    });
+                                    if !details.is_empty() {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(details).size(12.0).color(ui::MUTED),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+                                    let category = if r.category == 0 {
+                                        self.searched_category
+                                    } else {
+                                        r.category
+                                    };
+                                    let category = if category == 0 {
+                                        "Uncategorized".into()
+                                    } else {
+                                        categories::name(category)
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{}   •   {}   •   {}",
+                                                r.source,
+                                                category,
+                                                bytes(r.size)
+                                            ))
+                                            .size(12.0)
+                                            .color(ui::MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                            );
+                            if ui.put(button, egui::Button::new("Download")).clicked() {
+                                download = Some((r.url.clone(), format!("{}.nzb", r.title)));
+                            }
+                        });
+                    ui.add_space(8.0);
+                }
             });
-        }
         if let Some((url, name)) = download {
             if self.worker.is_none() {
                 self.notice = "Add and save a Usenet download provider in Settings first.".into();
@@ -830,22 +940,26 @@ impl eframe::App for Starburst {
                     ui.add_space(24.0);
                     ui.separator();
                     ui.add_space(22.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt(match self.page {
-                            Page::Downloads => "downloads",
-                            Page::Search => "discover",
-                            Page::History => "history",
-                            Page::Settings => "settings",
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(width);
-                            match self.page {
-                                Page::Settings => self.settings(ui, ctx),
-                                Page::Search => self.search(ui),
-                                Page::Downloads => self.downloads(ui, false),
-                                Page::History => self.downloads(ui, true),
-                            }
-                        });
+                    if self.page == Page::Search {
+                        self.search(ui);
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt(match self.page {
+                                Page::Downloads => "downloads",
+                                Page::Search => "discover",
+                                Page::History => "history",
+                                Page::Settings => "settings",
+                            })
+                            .show(ui, |ui| {
+                                ui.set_width(width);
+                                match self.page {
+                                    Page::Settings => self.settings(ui, ctx),
+                                    Page::Search => self.search(ui),
+                                    Page::Downloads => self.downloads(ui, false),
+                                    Page::History => self.downloads(ui, true),
+                                }
+                            });
+                    }
                 });
             });
     }

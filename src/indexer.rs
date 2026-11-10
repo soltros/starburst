@@ -39,7 +39,11 @@ pub fn preset_indexer(preset: &Preset) -> Indexer {
         api_key: String::new(),
     }
 }
-pub fn search_all(indexers: Vec<Indexer>, query: String) -> (Vec<Release>, Vec<String>) {
+pub fn search_all(
+    indexers: Vec<Indexer>,
+    query: String,
+    category: u32,
+) -> (Vec<Release>, Vec<String>) {
     let client = match reqwest::blocking::Client::builder()
         .user_agent(concat!("Starburst/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(25))
@@ -51,7 +55,7 @@ pub fn search_all(indexers: Vec<Indexer>, query: String) -> (Vec<Release>, Vec<S
     let mut rows = vec![];
     let mut errors = vec![];
     for indexer in indexers {
-        match search(&client, &indexer, &query) {
+        match search_filtered(&client, &indexer, &query, category) {
             Ok(mut r) => rows.append(&mut r),
             Err(e) => errors.push(format!("{}: {e}", indexer.name)),
         }
@@ -64,11 +68,20 @@ pub struct Release {
     pub url: String,
     pub size: u64,
     pub source: String,
+    pub category: u32,
 }
 pub fn search(
     client: &reqwest::blocking::Client,
     indexer: &Indexer,
     query: &str,
+) -> Result<Vec<Release>> {
+    search_filtered(client, indexer, query, 0)
+}
+pub fn search_filtered(
+    client: &reqwest::blocking::Client,
+    indexer: &Indexer,
+    query: &str,
+    category: u32,
 ) -> Result<Vec<Release>> {
     anyhow::ensure!(
         !indexer.api_key.trim().is_empty(),
@@ -86,6 +99,10 @@ pub fn search(
         .append_pair("o", "xml");
     if !query.trim().is_empty() {
         url.query_pairs_mut().append_pair("q", query.trim());
+    }
+    if category != 0 {
+        url.query_pairs_mut()
+            .append_pair("cat", &category.to_string());
     }
     // Deliberately omit request URLs from errors: they contain API keys.
     let response = client
@@ -179,6 +196,12 @@ fn parse_response(text: &str, source: &str, base: Option<&str>) -> Result<Vec<Re
             url,
             size,
             source: source.into(),
+            category: n
+                .children()
+                .filter(|n| n.has_tag_name("attr") && n.attribute("name") == Some("category"))
+                .filter_map(|n| n.attribute("value").and_then(|v| v.parse::<u32>().ok()))
+                .max()
+                .unwrap_or(0),
         });
     }
     anyhow::ensure!(
@@ -235,6 +258,14 @@ fn parse_json(text: &str, source: &str, base: Option<&str>) -> Result<Vec<Releas
                 url,
                 size,
                 source: source.into(),
+                category: item
+                    .get("category")
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse().ok())
+                            .or_else(|| v.as_u64().map(|n| n as u32))
+                    })
+                    .unwrap_or(0),
             });
         }
     }
@@ -297,6 +328,7 @@ mod http_tests {
             assert!(request.starts_with("GET /api?"));
             assert!(request.contains("q=hello+world%26test"));
             assert!(request.contains("apikey=private-key"));
+            assert!(request.contains("cat=5040"));
             let body="<rss><channel><item><title>Example</title><enclosure url=\"https://example.org/file.nzb\" length=\"42\"/></item></channel></rss>";
             write!(
                 stream,
@@ -311,7 +343,7 @@ mod http_tests {
             url: format!("http://{addr}"),
             api_key: "private-key".into(),
         };
-        let (rows, errors) = search_all(vec![i], "hello world&test".into());
+        let (rows, errors) = search_all(vec![i], "hello world&test".into(), 5040);
         assert!(errors.is_empty());
         server.join().unwrap();
         assert_eq!(rows[0].size, 42);
@@ -323,10 +355,11 @@ mod response_tests {
     use super::*;
     #[test]
     fn accepts_realistic_newznab_dtd_and_cdata() {
-        let xml = r#"<?xml version="1.0"?><!DOCTYPE rss SYSTEM "http://example.org/rss.dtd"><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel><item><title><![CDATA[Star Wars 2160p]]></title><enclosure url="https://example.org/get?id=1&amp;apikey=key" length="123456"/><newznab:attr name="size" value="123456"/></item></channel></rss>"#;
+        let xml = r#"<?xml version="1.0"?><!DOCTYPE rss SYSTEM "http://example.org/rss.dtd"><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel><item><title><![CDATA[Star Wars 2160p]]></title><enclosure url="https://example.org/get?id=1&amp;apikey=key" length="123456"/><newznab:attr name="size" value="123456"/><newznab:attr name="category" value="5045"/></item></channel></rss>"#;
         let rows = parse(xml, "NZBGeek").unwrap();
         assert_eq!(rows[0].title, "Star Wars 2160p");
         assert_eq!(rows[0].size, 123456);
+        assert_eq!(rows[0].category, 5045);
     }
     #[test]
     fn html_login_is_error_not_zero_results() {
