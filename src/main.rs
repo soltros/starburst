@@ -389,7 +389,7 @@ impl Starburst {
                 }
             });
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Category").size(13.0).color(ui::MUTED));
                 let previous = self.category_sub;
                 egui::ComboBox::from_id_salt("subcategory")
