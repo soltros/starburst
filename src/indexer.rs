@@ -122,12 +122,14 @@ pub fn search_filtered(
 pub fn parse(text: &str, source: &str) -> Result<Vec<Release>> {
     parse_response(text, source, None)
 }
-fn api_error(code: &str) -> anyhow::Error {
+pub(crate) fn api_error(code: &str) -> anyhow::Error {
     anyhow::anyhow!(
         match code {
             "100" => "Invalid API key. Copy the indexer's API key from your account settings.",
             "101" | "102" => "Indexer account is suspended or not permitted to use the API.",
-            "910" => "Indexer API quota or download limit reached. Check your account limits.",
+            "500" | "910" => "Indexer API request limit reached. Wait for your quota to reset.",
+            "501" => "Indexer download limit reached. Check your subscription or wait for your quota to reset.",
+            "300" => "This release is no longer available from the indexer.",
             "200" | "201" | "202" => "Indexer rejected the search request or parameters.",
             _ => "Indexer rejected the request. Check API access and account limits.",
         }

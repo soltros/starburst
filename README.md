@@ -78,3 +78,5 @@ Search errors are shown in Discover beside the results. Invalid keys, account re
 Discover includes standard Newznab category filters (Movies, TV, Music, Books, Apps, Games, Other, and Adult), plus subcategories such as HD and UHD. Category choices are sent as `cat` in API requests. A blank search browses recent releases. Filters remain visible while scrolling results. Indexers can differ in the categories they support.
 
 Result titles are presented separately from encoding details; hover a title to see the original release name, or right-click to copy it. Downloads retain the original name.
+
+NZB downloads are validated before entering the queue. Indexer errors (including request quota and download quota failures), login pages, and search feeds are reported directly. Gzip manifests, namespace-prefixed XML, and CDATA segment IDs are normalized for the embedded engine.

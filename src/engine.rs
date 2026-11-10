@@ -76,7 +76,7 @@ impl Worker {
                                 let d=downloader.clone();let updates=updates.clone();let ctx=ctx.clone();
                                 tokio::spawn(async move { let result=fetch_nzb(&url).await; match result {Ok(bytes)=>match d.add_nzb_content(&bytes,&name,DownloadOptions::default()).await {Ok(_)=>{let _=updates.send(Update::Message("Added to your queue".into()));},Err(e)=>{let _=updates.send(Update::Error(format!("Could not add NZB: {e}")));}},Err(e)=>{let _=updates.send(Update::Error(e.to_string()));}} ctx.request_repaint(); });
                             }
-                            Command::AddFile(path)=>{downloader.add_nzb(&path,DownloadOptions::default()).await?;send(Update::Message("Added to your queue".into()));}
+                            Command::AddFile(path)=>{let bytes=tokio::fs::read(&path).await?;let bytes=crate::manifest::prepare(&bytes)?;let name=path.file_name().and_then(|n|n.to_str()).unwrap_or("download.nzb");downloader.add_nzb_content(&bytes,name,DownloadOptions::default()).await?;send(Update::Message("Added to your queue".into()));}
                             Command::Pause(id)=>downloader.pause(DownloadId(id)).await?,
                             Command::Resume(id)=>downloader.resume(DownloadId(id)).await?,
                             Command::Cancel(id)=>downloader.cancel(DownloadId(id)).await?,
@@ -116,6 +116,7 @@ async fn fetch_nzb(url: &str) -> Result<Vec<u8>> {
         "NZB URL must use HTTP or HTTPS"
     );
     let client = reqwest::Client::builder()
+        .user_agent(concat!("Starburst/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(45))
         .build()?;
     let mut response = client
@@ -140,7 +141,7 @@ async fn fetch_nzb(url: &str) -> Result<Vec<u8>> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes)
+    crate::manifest::prepare(&bytes)
 }
 
 #[cfg(test)]
@@ -179,5 +180,48 @@ mod tests {
         reopened.shutdown().await.unwrap();
         drop(reopened);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod download_response_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    fn serve(body: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        (format!("http://{addr}/get?id=fixture"), handle)
+    }
+    #[tokio::test]
+    async fn rejects_indexer_download_limit_before_queuing() {
+        let (url, server) = serve(br#"<error code="501" description="Download limit reached"/>"#);
+        let error = fetch_nzb(&url).await.unwrap_err();
+        assert!(error.to_string().contains("download limit"));
+        server.join().unwrap();
+    }
+    #[tokio::test]
+    async fn fetches_valid_nzb_compatible_with_embedded_engine() {
+        let(url,server)=serve(br#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file subject="test.bin" date="1700000000" poster="test"><groups><group>alt.test</group></groups><segments><segment bytes="5" number="1">fixture@example.org</segment></segments></file></nzb>"#);
+        let bytes = fetch_nzb(&url).await.unwrap();
+        nntp_rs::parse_nzb(std::str::from_utf8(&bytes).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap();
+        server.join().unwrap();
     }
 }

@@ -3,6 +3,7 @@ mod config;
 mod diagnostics;
 mod engine;
 mod indexer;
+mod manifest;
 mod ui;
 use config::{Config, Provider};
 use eframe::egui::{self, Color32, RichText};
